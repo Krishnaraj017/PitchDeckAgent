@@ -133,53 +133,31 @@ Respond with ONLY the category name.
 
         self.answer_generation_prompt = PromptTemplate(
             input_variables=[
-            "query",
-            "query_type", 
-            "pitch_deck_context",
-            "funding_news_context",
-            "safety_context",
+                "query",
+                "query_type",
+                "pitch_deck_context",
+                "funding_news_context",
+                "safety_context",
             ],
             template="""
-    You are an expert VC Pitch Assistant. Generate a helpful, accurate, and safe response.
+You are a helpful and knowledgeable assistant. Use the information provided to answer the user's question clearly and accurately.
 
-    USER QUERY: {query}
-    QUERY TYPE: {query_type}
+USER QUESTION: {query}
 
-    PITCH DECK INSIGHTS: {pitch_deck_context}
-    FUNDING LANDSCAPE: {funding_news_context}
-    SAFETY CONTEXT: {safety_context}
+AVAILABLE CONTEXT:
+- PITCH DECK INSIGHTS: {pitch_deck_context}
+- FUNDING LANDSCAPE: {funding_news_context}
+- SAFETY CONTEXT: {safety_context}
 
-    RESPONSE GUIDELINES:
-    - If query contains words like "tell me", "explain", "what is" - provide a clear, conversational explanation using available context
-    - For informational queries, organize information in an easy-to-read format with relevant examples
-    - For advice queries, follow the structured format with recommendations
-    - Base all responses on evidence from search results
-    - Avoid guarantees or definitive predictions
-    - Maintain professional but accessible tone
-    - Include relevant context and examples
+GUIDELINES:
+- Answer naturally using the context provided, without referencing the context itself.
+- Be clear, professional, and concise.
+- Avoid speculative claims and do not guarantee outcomes.
+- Ensure responses are safe, respectful, and free of bias.
+- Do not include confidential or sensitive information.
 
-    SAFETY REQUIREMENTS:
-    - Do not provide confidential information
-    - Avoid discriminatory language or bias
-    - Include appropriate risk disclaimers
-    - Do not guarantee specific outcomes
-
-    For advice/recommendation queries, format response as:
-    1. **Executive Summary** (2-3 sentences)
-    2. **Key Recommendations** (3-5 actionable items)
-    3. **Supporting Evidence** (from search results)
-    4. **Risk Considerations** (potential challenges)
-    5. **Next Steps** (specific actions)
-    6. **Disclaimers** (limitations and risks)
-
-    For explanatory queries, provide:
-    - Clear explanation in conversational tone
-    - Relevant examples and context from search results 
-    - Important considerations and caveats
-    - Brief disclaimer if needed
-
-    RESPONSE:
-    """,
+ANSWER:
+""",
         )
 
     def input_safety_node(self, state: AgentState) -> Dict[str, Any]:
@@ -333,9 +311,10 @@ Respond with ONLY the category name.
 
                 vector_results = vector_future.result()
                 web_results = web_future.result()
-
+                print(vector_results)
                 search_results["vector"] = vector_results
                 search_results["web"] = web_results
+                print(search_results["vector"])
 
             search_metadata.update(
                 {
@@ -398,9 +377,7 @@ Respond with ONLY the category name.
 
             # Filter results for safety
             safe_results = self._filter_search_results(
-                self.vector_search_tool.format_results(
-                    documents, max_content_length=400
-                )
+                self.vector_search_tool.format_results(documents)
             )
 
             return safe_results
@@ -494,13 +471,16 @@ Respond with ONLY the category name.
             pitch_deck_context = self._format_pitch_deck_context(
                 state["search_results"]["vector"]
             )
+            print(pitch_deck_context)
             funding_news_context = self._format_funding_news_context(
                 state["search_results"]["web"]
             )
-            safety_context = self._format_safety_context(state.get("safety_checks", []))
+            # safety_context = self._format_safety_context(state.get("safety_checks", []))
+            safety_context = []
 
             # Generate initial response
             chain = self.answer_generation_prompt | self.llm
+            print(chain)
             response = chain.invoke(
                 {
                     "query": state["original_query"],
@@ -510,6 +490,7 @@ Respond with ONLY the category name.
                     "safety_context": safety_context,
                 }
             )
+            print("________", response)
 
             # Check output safety
             output_safety = self.content_guardrails.check_output_safety(

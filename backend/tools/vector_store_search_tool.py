@@ -212,7 +212,7 @@ class VectorStoreSearchTool:
             result = {
                 "rank": i + 1,
                 "content": (
-                    doc.page_content[:max_content_length] + "..."
+                    doc.page_content + "..."
                     if len(doc.page_content) > max_content_length
                     else doc.page_content
                 ),
