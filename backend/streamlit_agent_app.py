@@ -4,8 +4,7 @@ import time
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 import uuid
-from agent import EnhancedVCPitchAssistantAgent
-
+from agent import VCPitchAssistantAgent
 # Configure Streamlit page
 st.set_page_config(
     page_title="VC Pitch Assistant with Guardrails",
@@ -19,7 +18,7 @@ def initialize_session_state():
     """Initialize all session state variables."""
     if 'agent' not in st.session_state:
         try:
-            st.session_state.agent = EnhancedVCPitchAssistantAgent()
+            st.session_state.agent = VCPitchAssistantAgent()
             st.session_state.initialized = True
             st.session_state.init_error = None
         except Exception as e:
