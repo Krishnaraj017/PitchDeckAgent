@@ -1,0 +1,9 @@
+streamlit
+python-dotenv
+langgraph
+langchain
+langchain-google-genai
+langchain-community
+rich
+qdrant-client
+tavily-python
