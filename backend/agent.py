@@ -2,7 +2,6 @@ import os
 import json
 import hashlib
 from typing import TypedDict, Any, List, Dict, Optional, Annotated, Literal, Union
-from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +18,14 @@ from dotenv import load_dotenv
 
 from tools.web_search_tool import search_tavily
 from tools.vector_store_search_tool import VectorStoreSearchTool
+from utils.security_dataclass import SafetyCheck
+from utils.human_approval_dataclass import HumanApproval
+from guardrails.content_guardrails import ContentGuardrails
+from guardrails.rate_limiter import RateLimiter
+from utils.human_approval_dataclass import HumanApproval
+from human_loop.manager import HumanInTheLoopManager
+from utils.enums.action_type_enum import ActionType
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,67 +40,6 @@ llm = GoogleGenerativeAI(
     api_key=GOOGLE_API_KEY,
     temperature=0.3,
 )
-
-# =============================================================================
-# GUARDRAILS AND SAFETY ENUMS/CLASSES
-# =============================================================================
-
-
-class RiskLevel(Enum):
-    """Risk levels for content and actions."""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-class ActionType(Enum):
-    """Types of actions the agent can perform."""
-
-    SEARCH = "search"
-    GENERATE = "generate"
-    RECOMMEND = "recommend"
-    ANALYZE = "analyze"
-    EXTERNAL_CALL = "external_call"
-
-
-class GuardrailViolation(Enum):
-    """Types of guardrail violations."""
-
-    INAPPROPRIATE_CONTENT = "inappropriate_content"
-    DATA_PRIVACY = "data_privacy"
-    UNAUTHORIZED_ACCESS = "unauthorized_access"
-    RATE_LIMIT = "rate_limit"
-    CONTENT_POLICY = "content_policy"
-    HALLUCINATION_RISK = "hallucination_risk"
-    BIAS_DETECTED = "bias_detected"
-
-
-@dataclass
-class SafetyCheck:
-    """Safety check result."""
-
-    passed: bool
-    risk_level: RiskLevel
-    violations: List[GuardrailViolation] = field(default_factory=list)
-    confidence: float = 1.0
-    explanation: str = ""
-    auto_approved: bool = False
-
-
-@dataclass
-class HumanApproval:
-    """Human approval request and response."""
-
-    request_id: str
-    action_type: ActionType
-    content: str
-    risk_assessment: SafetyCheck
-    timestamp: datetime
-    approved: Optional[bool] = None
-    human_feedback: str = ""
-    timeout_seconds: int = 300
 
 
 # =============================================================================
@@ -131,283 +77,7 @@ class AgentState(TypedDict):
     auto_approval_enabled: bool
 
 
-# =============================================================================
-# GUARDRAILS SYSTEM
-# =============================================================================
-
-
-class ContentGuardrails:
-    """Content safety and compliance guardrails."""
-
-    def __init__(self):
-        self.blocked_patterns = [
-            r"(confidential|proprietary|trade secret)",
-            r"(insider information|material non-public)",
-            r"(illegal|fraudulent|deceptive)",
-            r"(discriminatory|biased hiring)",
-        ]
-        self.sensitive_topics = [
-            "personal financial data",
-            "private company financials",
-            "unreleased product details",
-            "employee personal info",
-        ]
-
-    def check_input_safety(self, content: str, context: Dict[str, Any]) -> SafetyCheck:
-        """Check input content for safety violations."""
-        violations = []
-        risk_level = RiskLevel.LOW
-
-        # Check for inappropriate content
-        content_lower = content.lower()
-
-        # Privacy violations
-        if any(
-            pattern in content_lower
-            for pattern in ["ssn", "social security", "bank account"]
-        ):
-            violations.append(GuardrailViolation.DATA_PRIVACY)
-            risk_level = RiskLevel.HIGH
-
-        # Inappropriate requests
-        if any(
-            word in content_lower
-            for word in ["hack", "exploit", "manipulate investors"]
-        ):
-            violations.append(GuardrailViolation.INAPPROPRIATE_CONTENT)
-            risk_level = RiskLevel.CRITICAL
-
-        # Content policy violations
-        if len(content) > 5000:  # Prevent prompt injection
-            violations.append(GuardrailViolation.CONTENT_POLICY)
-            risk_level = max(risk_level, RiskLevel.MEDIUM)
-
-        return SafetyCheck(
-            passed=len(violations) == 0,
-            risk_level=risk_level,
-            violations=violations,
-            explanation=f"Input safety check: {len(violations)} violations found",
-        )
-
-    def check_output_safety(self, content: str, context: Dict[str, Any]) -> SafetyCheck:
-        """Check output content for safety and quality."""
-        violations = []
-        risk_level = RiskLevel.LOW
-
-        # Check for potential hallucinations
-        if self._detect_hallucination_risk(content):
-            violations.append(GuardrailViolation.HALLUCINATION_RISK)
-            risk_level = RiskLevel.MEDIUM
-
-        # Check for bias
-        if self._detect_bias(content):
-            violations.append(GuardrailViolation.BIAS_DETECTED)
-            risk_level = max(risk_level, RiskLevel.MEDIUM)
-
-        # Check for sensitive information leakage
-        if any(topic in content.lower() for topic in self.sensitive_topics):
-            violations.append(GuardrailViolation.DATA_PRIVACY)
-            risk_level = RiskLevel.HIGH
-
-        return SafetyCheck(
-            passed=risk_level in [RiskLevel.LOW, RiskLevel.MEDIUM],
-            risk_level=risk_level,
-            violations=violations,
-            explanation=f"Output safety check: {len(violations)} violations found",
-        )
-
-    def _detect_hallucination_risk(self, content: str) -> bool:
-        """Detect potential hallucinations in generated content."""
-        # Simple heuristics - in production, use more sophisticated methods
-        hallucination_indicators = [
-            "definitely will succeed",
-            "guaranteed returns",
-            "100% certain",
-            "never fails",
-            "always works",
-        ]
-        return any(
-            indicator in content.lower() for indicator in hallucination_indicators
-        )
-
-    def _detect_bias(self, content: str) -> bool:
-        """Detect potential bias in generated content."""
-        bias_indicators = [
-            "obviously better",
-            "clearly inferior",
-            "all successful founders are",
-            "typical female entrepreneur",
-        ]
-        return any(indicator in content.lower() for indicator in bias_indicators)
-
-
-class RateLimiter:
-    """Rate limiting for API calls and actions."""
-
-    def __init__(self):
-        self.limits = {
-            ActionType.SEARCH: {"count": 0, "limit": 10, "window": 3600},  # 10/hour
-            ActionType.GENERATE: {"count": 0, "limit": 50, "window": 3600},  # 50/hour
-            ActionType.EXTERNAL_CALL: {
-                "count": 0,
-                "limit": 5,
-                "window": 3600,
-            },  # 5/hour
-        }
-        self.reset_times = {}
-
-    def check_rate_limit(self, action_type: ActionType) -> SafetyCheck:
-        """Check if action is within rate limits."""
-        now = datetime.now()
-
-        # Reset counters if window expired
-        if action_type not in self.reset_times:
-            self.reset_times[action_type] = now + timedelta(
-                seconds=self.limits[action_type]["window"]
-            )
-        elif now > self.reset_times[action_type]:
-            self.limits[action_type]["count"] = 0
-            self.reset_times[action_type] = now + timedelta(
-                seconds=self.limits[action_type]["window"]
-            )
-
-        # Check limit
-        current_count = self.limits[action_type]["count"]
-        limit = self.limits[action_type]["limit"]
-
-        if current_count >= limit:
-            return SafetyCheck(
-                passed=False,
-                risk_level=RiskLevel.HIGH,
-                violations=[GuardrailViolation.RATE_LIMIT],
-                explanation=f"Rate limit exceeded for {action_type.value}: {current_count}/{limit}",
-            )
-
-        # Increment counter
-        self.limits[action_type]["count"] += 1
-
-        return SafetyCheck(
-            passed=True,
-            risk_level=RiskLevel.LOW,
-            explanation=f"Rate limit OK: {current_count + 1}/{limit}",
-        )
-
-
-# =============================================================================
-# HUMAN-IN-THE-LOOP SYSTEM
-# =============================================================================
-
-
-class HumanInTheLoopManager:
-    """Manages human approval workflows."""
-
-    def __init__(self):
-        self.pending_approvals = {}
-        self.approval_history = []
-        self.auto_approval_rules = {
-            RiskLevel.LOW: True,
-            RiskLevel.MEDIUM: False,  # Require human approval
-            RiskLevel.HIGH: False,
-            RiskLevel.CRITICAL: False,
-        }
-
-    def requires_approval(
-        self, action_type: ActionType, safety_check: SafetyCheck
-    ) -> bool:
-        """Determine if action requires human approval."""
-        # Auto-approve low-risk actions
-        if safety_check.risk_level == RiskLevel.LOW:
-            return False
-
-        # Always require approval for critical risk
-        if safety_check.risk_level == RiskLevel.CRITICAL:
-            return True
-
-        # Apply custom rules based on action type
-        if action_type == ActionType.EXTERNAL_CALL:
-            return True  # Always require approval for external calls
-
-        if action_type == ActionType.GENERATE and len(safety_check.violations) > 0:
-            return True
-
-        return not self.auto_approval_rules.get(safety_check.risk_level, False)
-
-    def request_approval(
-        self,
-        action_type: ActionType,
-        content: str,
-        safety_check: SafetyCheck,
-        timeout: int = 300,
-    ) -> HumanApproval:
-        """Request human approval for an action."""
-        request_id = hashlib.md5(
-            f"{action_type.value}{content}{datetime.now()}".encode()
-        ).hexdigest()[:8]
-
-        approval = HumanApproval(
-            request_id=request_id,
-            action_type=action_type,
-            content=content,
-            risk_assessment=safety_check,
-            timestamp=datetime.now(),
-            timeout_seconds=timeout,
-        )
-
-        self.pending_approvals[request_id] = approval
-        return approval
-
-    def simulate_human_approval(self, approval: HumanApproval) -> HumanApproval:
-        """Simulate human approval for demo purposes."""
-        # In production, this would integrate with actual human reviewers
-        console.print(f"\n🚨 HUMAN APPROVAL REQUIRED", style="bold red")
-
-        table = Table()
-        table.add_column("Field", style="cyan")
-        table.add_column("Value", style="white")
-
-        table.add_row("Request ID", approval.request_id)
-        table.add_row("Action Type", approval.action_type.value)
-        table.add_row("Risk Level", approval.risk_assessment.risk_level.value)
-        table.add_row(
-            "Violations",
-            ", ".join([v.value for v in approval.risk_assessment.violations]),
-        )
-        table.add_row(
-            "Content Preview",
-            (
-                approval.content[:100] + "..."
-                if len(approval.content) > 100
-                else approval.content
-            ),
-        )
-
-        console.print(table)
-
-        # Simulate approval logic
-        if approval.risk_assessment.risk_level == RiskLevel.CRITICAL:
-            approval.approved = False
-            approval.human_feedback = "DENIED: Critical risk level detected"
-        elif len(approval.risk_assessment.violations) > 2:
-            approval.approved = False
-            approval.human_feedback = "DENIED: Multiple violations detected"
-        else:
-            approval.approved = True
-            approval.human_feedback = "APPROVED: Acceptable risk level"
-
-        console.print(
-            f"Decision: {'✅ APPROVED' if approval.approved else '❌ DENIED'}",
-            style="green" if approval.approved else "red",
-        )
-
-        return approval
-
-
-# =============================================================================
-#  VC PITCH ASSISTANT WITH GUARDRAILS
-# =============================================================================
-
-
-class EnhancedVCPitchAssistantAgent:
+class VCPitchAssistantAgent:
     def __init__(self):
         """Initialize enhanced agent with guardrails and HITL."""
         self.llm = llm
@@ -463,46 +133,53 @@ Respond with ONLY the category name.
 
         self.answer_generation_prompt = PromptTemplate(
             input_variables=[
-                "query",
-                "query_type",
-                "pitch_deck_context",
-                "funding_news_context",
-                "safety_context",
+            "query",
+            "query_type", 
+            "pitch_deck_context",
+            "funding_news_context",
+            "safety_context",
             ],
             template="""
-You are an expert VC Pitch Assistant. Generate a helpful, accurate, and safe response.
+    You are an expert VC Pitch Assistant. Generate a helpful, accurate, and safe response.
 
-USER QUERY: {query}
-QUERY TYPE: {query_type}
+    USER QUERY: {query}
+    QUERY TYPE: {query_type}
 
-PITCH DECK INSIGHTS: {pitch_deck_context}
-FUNDING LANDSCAPE: {funding_news_context}
-SAFETY CONTEXT: {safety_context}
+    PITCH DECK INSIGHTS: {pitch_deck_context}
+    FUNDING LANDSCAPE: {funding_news_context}
+    SAFETY CONTEXT: {safety_context}
 
-RESPONSE GUIDELINES:
-- Provide specific, actionable advice
-- Base recommendations on evidence from search results
-- Avoid guarantees or definitive predictions
-- Include appropriate disclaimers for financial advice
-- Maintain professional, unbiased tone
-- Flag any limitations in the available data
+    RESPONSE GUIDELINES:
+    - If query contains words like "tell me", "explain", "what is" - provide a clear, conversational explanation using available context
+    - For informational queries, organize information in an easy-to-read format with relevant examples
+    - For advice queries, follow the structured format with recommendations
+    - Base all responses on evidence from search results
+    - Avoid guarantees or definitive predictions
+    - Maintain professional but accessible tone
+    - Include relevant context and examples
 
-SAFETY REQUIREMENTS:
-- Do not provide confidential information
-- Avoid discriminatory language or bias
-- Include appropriate risk disclaimers
-- Do not guarantee specific outcomes
+    SAFETY REQUIREMENTS:
+    - Do not provide confidential information
+    - Avoid discriminatory language or bias
+    - Include appropriate risk disclaimers
+    - Do not guarantee specific outcomes
 
-Format your response with:
-1. **Executive Summary** (2-3 sentences)
-2. **Key Recommendations** (3-5 actionable items)
-3. **Supporting Evidence** (from search results)
-4. **Risk Considerations** (potential challenges)
-5. **Next Steps** (specific actions)
-6. **Disclaimers** (limitations and risks)
+    For advice/recommendation queries, format response as:
+    1. **Executive Summary** (2-3 sentences)
+    2. **Key Recommendations** (3-5 actionable items)
+    3. **Supporting Evidence** (from search results)
+    4. **Risk Considerations** (potential challenges)
+    5. **Next Steps** (specific actions)
+    6. **Disclaimers** (limitations and risks)
 
-RESPONSE:
-""",
+    For explanatory queries, provide:
+    - Clear explanation in conversational tone
+    - Relevant examples and context from search results 
+    - Important considerations and caveats
+    - Brief disclaimer if needed
+
+    RESPONSE:
+    """,
         )
 
     def input_safety_node(self, state: AgentState) -> Dict[str, Any]:
@@ -920,7 +597,7 @@ RESPONSE:
 
             context_parts.append(
                 f"EXAMPLE {i}: {startup_name} ({stage} - {industry})\n"
-                f"Key Insights: {content[:300]}...\n"
+                f"Key Insights: {content}...\n"
             )
 
         return (
@@ -1267,15 +944,14 @@ RESPONSE:
 # =============================================================================
 
 
-def demo_enhanced_agent():
+def demo_agent():
     """Demonstrate the enhanced VC Pitch Assistant with guardrails."""
     try:
         console.print("🎯 Initializing Enhanced VC Pitch Assistant", style="bold blue")
-        agent = EnhancedVCPitchAssistantAgent()
+        agent = VCPitchAssistantAgent()
 
         # Test queries with different risk levels
         test_scenarios = [
-          
             {
                 "query": "tell me about the vapi pitch deck",
                 "expected_risk": "low",
@@ -1330,12 +1006,7 @@ def demo_enhanced_agent():
                 console.print(f"\n❌ Error: {result['error']}", style="bold red")
             else:
                 console.print(f"\n📊 Response:", style="bold green")
-                console.print(
-                    Panel(
-                        result["answer"]
-                        
-                    )
-                )
+                console.print(Panel(result["answer"]))
 
             # Show guardrail violations if any
             if result["guardrail_violations"]:
@@ -1381,7 +1052,7 @@ def demo_enhanced_agent():
 
 def main():
     """Main function to run the enhanced demo."""
-    demo_enhanced_agent()
+    demo_agent()
 
 
 if __name__ == "__main__":
