@@ -72,7 +72,7 @@ class QdrantDataUploader:
                 collection_name=self.collection_name,
                 vectors_config=qdrant_models.VectorParams(
                     size=self.vector_size,
-                    distance=qdrant_models.Distance.COSINE,
+                    distance=qdrant_models.Distance.COSINE, 
                     on_disk=self.on_disk,
                 ),
                 optimizers_config=qdrant_models.OptimizersConfigDiff(
